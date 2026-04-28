@@ -1,0 +1,16 @@
+{
+  "name": "agent-budget-billing",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "gateway",
+    "dashboard",
+    "agent",
+    "program"
+  ],
+  "scripts": {
+    "dev:gateway": "npm run dev --workspace gateway",
+    "dev:dashboard": "npm run dev --workspace dashboard",
+    "dev:agent": "npm run dev --workspace agent"
+  }
+}

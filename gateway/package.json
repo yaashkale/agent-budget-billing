@@ -1,0 +1,21 @@
+{
+  "name": "@agent-budget-billing/gateway",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "build": "echo 'gateway build not wired yet'"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.8",
+    "@solana/web3.js": "^1.98.4",
+    "hono": "^4.6.10"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.8.3"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "@agent-budget-billing/agent",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "echo 'agent runtime not wired yet'",
+    "build": "echo 'agent build not wired yet'"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "@agent-budget-billing/program",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "echo 'anchor program not wired yet'",
+    "test": "echo 'anchor tests not wired yet'"
+  }
+}
