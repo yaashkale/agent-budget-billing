@@ -1,5 +1,15 @@
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY ?? null;
 
+export class HolderDistributionError extends Error {
+  statusCode: 422 | 502;
+
+  constructor(message: string, statusCode: 422 | 502 = 422) {
+    super(message);
+    this.name = "HolderDistributionError";
+    this.statusCode = statusCode;
+  }
+}
+
 export type HolderDistributionResponse = {
   address: string;
   shortAddress: string;
@@ -180,8 +190,17 @@ export async function fetchHolderDistribution(input: {
   });
 
   if (!largestAccounts?.value?.length || !supply?.value) {
-    throw new Error(
+    throw new HolderDistributionError(
       `No holder concentration data available for ${input.address}. This tool expects a token mint address.`
+    );
+  }
+
+  if (
+    largestAccounts.value.length === 0 &&
+    input.cluster === "mainnet-beta"
+  ) {
+    throw new HolderDistributionError(
+      `No holder concentration data was returned for ${input.address}. Try a different token mint.`
     );
   }
 
@@ -256,4 +275,28 @@ export async function fetchHolderDistribution(input: {
       "If token accounts are custodial or exchange-owned, concentration may overstate single-entity ownership.",
     ],
   };
+}
+
+export function normalizeHolderDistributionError(error: unknown) {
+  if (error instanceof HolderDistributionError) {
+    return error;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+
+  if (message.includes("Too many accounts requested")) {
+    return new HolderDistributionError(
+      "This token mint is too large for the current holder-distribution query. Try a smaller token mint for the demo.",
+      422
+    );
+  }
+
+  if (message.includes("No holder concentration data available")) {
+    return new HolderDistributionError(message, 422);
+  }
+
+  return new HolderDistributionError(
+    "Holder distribution lookup failed for this target. Try a different token mint or retry later.",
+    502
+  );
 }

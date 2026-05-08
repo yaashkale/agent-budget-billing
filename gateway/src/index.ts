@@ -33,6 +33,7 @@ import {
 } from "./report-surface.js";
 import {
   fetchHolderDistribution,
+  normalizeHolderDistributionError,
   type HolderDistributionResponse,
 } from "./publishers/holder-distribution.js";
 import { generateLlmAnalysis } from "./publishers/llm-analysis.js";
@@ -565,13 +566,20 @@ async function fetchPublisherToolResponse(input: {
   data: PublisherToolResponse;
 }> {
   if (input.slug === "holder-distribution") {
-    return {
-      statusCode: 200,
-      data: await fetchHolderDistribution({
-        address: input.address,
-        cluster: input.cluster,
-      }),
-    };
+    try {
+      return {
+        statusCode: 200,
+        data: await fetchHolderDistribution({
+          address: input.address,
+          cluster: input.cluster,
+        }),
+      };
+    } catch (error) {
+      const normalizedError = normalizeHolderDistributionError(error);
+      throw new HTTPException(normalizedError.statusCode, {
+        message: normalizedError.message,
+      });
+    }
   }
 
   const upstream = await fetchWalletSummaryFromPublisher({
