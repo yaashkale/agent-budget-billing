@@ -11,7 +11,8 @@
   "dependencies": {
     "@hono/node-server": "^1.13.8",
     "@solana/web3.js": "^1.98.4",
-    "hono": "^4.6.10"
+    "hono": "^4.6.10",
+    "pg": "^8.20.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
