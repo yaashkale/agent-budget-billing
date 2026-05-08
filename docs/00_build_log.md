@@ -117,10 +117,137 @@ Anything meaningful we finish or decide should be appended here so the build con
     - `x-solana-payment-lamports`
     - `x-usage-event-id`
   - `/dev/payments` shows the verified payment as consumed (single-use behavior works)
+- Started the Apr 28 plan with an in-memory agent runtime skeleton.
+- Added:
+  - `POST /api/runs`
+  - `GET /api/runs`
+  - `GET /api/runs/:id`
+- Upgraded the runtime skeleton so `POST /api/runs` now requires:
+  - `X-API-Key`
+  - `prompt`
+  - `targetAddress`
+  - optional `cluster`
+- Added a second monetized proxy route:
+  - `GET /p/recent-activity?address=...&cluster=...`
+  - implemented as a shaped view over publisher 0's wallet-summary response
+- Added a third monetized proxy route:
+  - `GET /p/risk-flags?address=...&cluster=...`
+  - implemented as heuristic risk extraction over publisher 0's wallet-summary response
+- Planner v0 now executes three real paid tool calls:
+  - `wallet_summary`
+  - `recent_activity`
+  - `risk_flags`
+  - final brief/report is still deterministic/template-based
+- Verified the first real agent-funded run end-to-end:
+  - `POST /api/runs` succeeded with a real multi-tool result
+  - the run stored step-level status and output summaries for all 4 steps
+  - `GET /api/runs` now lists the created run
+  - `GET /api/runs/:id` returns the run details correctly
+  - `GET /api/runs/:id/report` now returns a presentation-friendly report payload and markdown view
+  - `GET /demo` now returns a browser launcher for creating runs and browsing recent runs
+  - `GET /demo/runs/:id` now returns a browser-friendly HTML report page
+  - run budget spend is now `150,000` micro-USDC total (`3 x 50,000`)
+  - `/dev/usage-events` recorded three agent-paid tool calls for the same `runId`:
+    - `/p/wallet-summary`
+    - `/p/recent-activity`
+    - `/p/risk-flags`
+  - direct human smoke tests against:
+    - `/p/recent-activity`
+    - `/p/risk-flags`
+    both succeeded
+  - run output now includes a small structured `resultArtifact`:
+    - `headline`
+    - `executiveSummary`
+    - `findings[]`
+    - `recommendation`
+    - `riskLevel`
+    - `spendSummary`
+    - `sources[]`
+- extracted the demo HTML rendering into:
+  - `gateway/src/report-surface.ts`
+    as the first small step toward splitting `gateway/src/index.ts`
+- Started the Apr 29 persistence pass for gateway budget state.
+- Added optional Postgres-backed budget persistence in:
+  - `gateway/src/persistence.ts`
+- Installed `pg` in the gateway workspace.
+- Gateway now:
+  - seeds the dev API key into Postgres when `DATABASE_URL` is configured
+  - looks up human API keys from Postgres before falling back to in-memory state
+  - persists Dodo webhook budget upserts to Postgres when available
+  - debits Postgres-backed budgets during paid calls and agent runs
+  - reports `budgetPersistence: "postgres" | "memory"` from `/health`
+- Kept a graceful fallback path so local dev still works without a running database.
+- Installed and started local PostgreSQL 16 via Homebrew.
+- Created the local project database:
+  - `agent_budget_billing`
+- Applied `db/migrations/001_initial_schema.sql` successfully.
+- Verified the gateway against a real local `DATABASE_URL` using a temporary mock publisher on port `3000`.
+- Confirmed:
+  - `/health` reports `budgetPersistence: "postgres"`
+  - gateway seed logic created the default publisher, dev budget, and dev API key in Postgres
+  - `POST /webhooks/dodo` created a subscription-backed budget in Postgres
+  - `ALL /p/wallet-summary?...` with the webhook-issued API key returned `200`
+  - the Postgres-backed budget row debited correctly from `250000` to `150000` micro-USDC after the paid call
+- Found and fixed an Apr 29 bug in `gateway/src/persistence.ts` where the first DB debit path updated the in-memory response but failed to persist the balance change in Postgres.
+- Continued the Apr 29 persistence pass with Postgres-backed `usage_events` for API-key-funded calls.
+- Gateway now persists `usage_events` to Postgres for:
+  - direct human API-key proxy calls
+  - agent-funded tool calls inside `POST /api/runs`
+- `GET /dev/usage-events` now reads from Postgres when DB persistence is enabled.
+- Verified:
+  - a direct `wallet-summary` call inserted a `usage_events` row with the expected billed amount and post-call budget balance
+  - an agent run inserted three `usage_events` rows:
+    - `/p/wallet-summary`
+    - `/p/recent-activity`
+    - `/p/risk-flags`
+  - all three agent rows share the same `request_id` (`runId`), so the run-level billing trace is preserved in the ledger
+- Found and fixed a follow-up Postgres query bug in `listBudgetsFromDatabase` (`max(uuid)`), after expanding budget records to carry `publisherId` and `apiKeyId` for event persistence.
+- Added `db/migrations/002_usage_events_budget_id.sql`.
+- `usage_events` now stores `budget_id` directly instead of requiring the gateway to reconstruct budget ownership via `api_keys` + `user_budgets` joins at read time.
+- Backfilled existing local `usage_events` rows so the new `budget_id` column is populated for already-recorded API-key-funded events.
+- Updated Postgres event writes to insert `budget_id` directly.
+- Updated Postgres event reads to join `user_budgets` by stored `usage_events.budget_id`.
+- Verified:
+  - existing direct human and agent-funded usage events were backfilled with the correct `budget_id`
+  - `/dev/usage-events` now reflects the stored budget linkage cleanly
+- Started Block A scaffolding for a fifth paid tool:
+  - `gateway/src/publishers/holder-distribution.ts`
+- Added paid gateway support for:
+  - `ALL /p/holder-distribution?address=...&cluster=...`
+- Current holder-distribution behavior:
+  - deterministic mock response when `HELIUS_API_KEY` is unset
+  - optional Helius-backed RPC path when the key is configured
+  - top-holder concentration summary, top-10/top-20 percentages, and ranked holder rows
+- Kept the planner/runtime unchanged tonight so the new tool lands as a clean route-level slice first.
+- Wired the new holder-distribution tool into the agent runtime.
+- Planner v0 now performs four paid tool calls per run:
+  - `wallet_summary`
+  - `recent_activity`
+  - `holder_distribution`
+  - `risk_flags`
+- Updated the run artifact so the final brief now includes holder concentration findings,
+  source information (`mock` vs `helius`), and a 4-call spend summary.
+- Added `gateway/src/publishers/llm-analysis.ts` as an internal synthesis tool.
+- `llm-analysis` now:
+  - uses the OpenAI Responses API when `OPENAI_API_KEY` is configured
+  - falls back to deterministic local synthesis when the key is absent
+  - returns structured fields for `executiveSummary`, `findings`, `recommendation`, and `riskLevel`
+- Split the runtime pipeline so `risk_flags` and `llm_analysis` are separate paid steps.
+- Planner v0 now performs five paid tool calls per run:
+  - `wallet_summary`
+  - `recent_activity`
+  - `holder_distribution`
+  - `risk_flags`
+  - `llm_analysis`
+- Updated the run artifact so the final brief is now driven by the `llm_analysis`
+  result and the spend summary reflects a 5-call run.
 
 ## Current next step
 
-- Day 27 is functionally complete. Move to the Apr 28 plan.
+- Continue Apr 28 properly:
+  - validate holder-distribution on a real Helius key
+  - validate the OpenAI-backed `llm-analysis` path with a real API key
+  - keep the planner simple and avoid overbuilding orchestration
 
 ## Logging rule
 
