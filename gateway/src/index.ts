@@ -1,7 +1,5 @@
-// Day 1 scope: in-memory state only.
-// Postgres schema lives in db/migrations/001_initial_schema.sql but is NOT yet wired.
-// Drizzle/pg integration lands Day 2 morning.
-// Multi-publisher routing, USDC SPL parsing, and HMAC webhook verification land Day 2-4.
+// Current scope: gateway runtime with optional DB-backed budgets and API-key lookup.
+// Multi-publisher routing, USDC SPL parsing, and full webhook verification still land later.
 
 import { serve } from "@hono/node-server";
 import {
@@ -11,6 +9,33 @@ import {
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { randomUUID } from "node:crypto";
+import {
+  fetchAgentRun,
+  fetchAgentRuns,
+  startAgentRun,
+} from "./agent-runtime.js";
+import {
+  debitBudgetInDatabase,
+  getBudgetByApiKeyFromDatabase,
+  initializeBudgetPersistence,
+  isDatabaseEnabled,
+  listBudgetsFromDatabase,
+  listUsageEventsFromDatabase,
+  type BudgetRecord,
+  type DodoSubscriptionPayload,
+  recordUsageEventInDatabase,
+  type UsageEventRecord,
+  upsertBudgetFromDodoInDatabase,
+} from "./persistence.js";
+import {
+  renderDemoHomeHtml,
+  renderRunReportHtml,
+} from "./report-surface.js";
+import {
+  fetchHolderDistribution,
+  type HolderDistributionResponse,
+} from "./publishers/holder-distribution.js";
+import { generateLlmAnalysis } from "./publishers/llm-analysis.js";
 
 const PORT = Number(process.env.PORT ?? 8787);
 const PUBLISHER_ORIGIN =
@@ -36,48 +61,6 @@ const WALLET_SUMMARY_CALL_COST_LAMPORTS = Number(
 const app = new Hono();
 const solanaConnection = new Connection(SOLANA_RPC_URL, "confirmed");
 
-type BudgetRecord = {
-  budgetId: string;
-  subscriptionId: string | null;
-  ownerEmail: string;
-  apiKey: string;
-  balanceUsdcMicros: number;
-  refillAmountUsdcMicros: number;
-  status: "active" | "paused" | "exhausted" | "cancelled";
-  lastWebhookEvent: string | null;
-  lastRefilledAt: string | null;
-  updatedAt: string;
-};
-
-type DodoSubscriptionPayload = {
-  type: string;
-  timestamp?: string;
-  data?: {
-    subscription_id?: string;
-    status?: string;
-    recurring_pre_tax_amount?: number;
-    customer?: {
-      email?: string;
-      name?: string;
-    };
-  };
-};
-
-type UsageEventRecord = {
-  eventId: string;
-  budgetId: string;
-  ownerEmail: string;
-  subscriptionId: string | null;
-  callerType: "human" | "agent";
-  endpointPath: string;
-  method: string;
-  statusCode: number;
-  billedUsdcMicros: number;
-  budgetBalanceAfterUsdcMicros: number;
-  requestId: string | null;
-  createdAt: string;
-};
-
 type VerifiedPaymentRecord = {
   paymentId: string;
   txSignature: string;
@@ -90,16 +73,143 @@ type VerifiedPaymentRecord = {
   verifiedAt: string;
 };
 
+type WalletSummaryApiResponse = {
+  address: string;
+  shortAddress: string;
+  cluster: string;
+  explorerUrl: string;
+  solBalance: number;
+  recentSignatureCount: number;
+  recentSignatures: Array<{
+    signature: string;
+    blockTime: number | null;
+    explorerUrl: string | null;
+  }>;
+  summary: string;
+};
+
+type PublisherToolResponse =
+  | WalletSummaryApiResponse
+  | HolderDistributionResponse
+  | Record<string, unknown>;
+
+function formatUsdMicros(usdcMicros: number) {
+  return `$${(usdcMicros / 1_000_000).toFixed(2)}`;
+}
+
+function formatRunReport(run: ReturnType<typeof fetchAgentRun>) {
+  if (!run) {
+    return null;
+  }
+
+  const artifact = run.resultArtifact;
+  const reportMarkdown = artifact
+    ? [
+        `# ${artifact.headline}`,
+        "",
+        `**Prompt**: ${run.prompt}`,
+        `**Target wallet**: ${run.targetAddress}`,
+        `**Status**: ${run.status}`,
+        `**Risk level**: ${artifact.riskLevel}`,
+        "",
+        "## Executive Summary",
+        artifact.executiveSummary,
+        "",
+        "## Findings",
+        ...artifact.findings.map((finding) => `- ${finding}`),
+        "",
+        "## Spend",
+        `- Allocated: ${formatUsdMicros(artifact.spendSummary.allocatedUsdcMicros)}`,
+        `- Spent: ${formatUsdMicros(artifact.spendSummary.spentUsdcMicros)}`,
+        `- Remaining: ${formatUsdMicros(artifact.spendSummary.remainingUsdcMicros)}`,
+        `- Paid tool calls: ${artifact.spendSummary.paidToolCalls}`,
+        "",
+        "## Sources",
+        ...artifact.sources.map(
+          (source) =>
+            `- ${source.tool} via \`${source.endpointPath}\`: ${source.description}`
+        ),
+        "",
+        "## Recommendation",
+        artifact.recommendation,
+      ].join("\n")
+    : null;
+
+  return {
+    runId: run.runId,
+    status: run.status,
+    headline: artifact?.headline ?? null,
+    riskLevel: artifact?.riskLevel ?? null,
+    executiveSummary: artifact?.executiveSummary ?? null,
+    findings: artifact?.findings ?? [],
+    recommendation: artifact?.recommendation ?? null,
+    spendSummary: artifact?.spendSummary ?? null,
+    sources: artifact?.sources ?? [],
+    markdown: reportMarkdown,
+  };
+}
+
+function formatRunListForDemo() {
+  return fetchAgentRuns()
+    .slice()
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .map((run) => ({
+      runId: run.runId,
+      prompt: run.prompt,
+      targetAddress: run.targetAddress,
+      status: run.status,
+      riskLevel: run.resultArtifact?.riskLevel ?? null,
+      spentUsdcMicros: run.budgetSpentUsdcMicros,
+      createdAt: run.createdAt,
+    }));
+}
+
 const budgetsById = new Map<string, BudgetRecord>();
 const budgetIdsBySubscription = new Map<string, string>();
 const budgetIdsByApiKey = new Map<string, string>();
 const usageEvents: UsageEventRecord[] = [];
 const verifiedPaymentsBySignature = new Map<string, VerifiedPaymentRecord>();
-const ALLOWED_SLUGS = new Set(["wallet-summary"]);
+const ALLOWED_SLUGS = new Set([
+  "wallet-summary",
+  "recent-activity",
+  "risk-flags",
+  "holder-distribution",
+]);
 
-function seedDevBudget() {
+function rememberBudget(budget: BudgetRecord) {
+  budgetsById.set(budget.budgetId, budget);
+
+  if (budget.subscriptionId) {
+    budgetIdsBySubscription.set(budget.subscriptionId, budget.budgetId);
+  }
+
+  if (budget.apiKey) {
+    budgetIdsByApiKey.set(budget.apiKey, budget.budgetId);
+  }
+
+  return budget;
+}
+
+async function seedDevBudget() {
+  if (isDatabaseEnabled()) {
+    const seededBudget = await initializeBudgetPersistence({
+      publisherOrigin: PUBLISHER_ORIGIN,
+      solanaRecipient: DEV_SOLANA_RECIPIENT,
+      devApiKey: DEV_API_KEY,
+      defaultBudgetRefillUsdcMicros: DEFAULT_BUDGET_REFILL_USDC_MICROS,
+    });
+
+    if (seededBudget) {
+      rememberBudget({
+        ...seededBudget,
+        apiKey: DEV_API_KEY,
+      });
+      return;
+    }
+  }
+
   const now = new Date().toISOString();
-  const devBudget: BudgetRecord = {
+  rememberBudget({
     budgetId: "dev-budget",
     subscriptionId: null,
     ownerEmail: "dev@example.com",
@@ -110,17 +220,16 @@ function seedDevBudget() {
     lastWebhookEvent: null,
     lastRefilledAt: now,
     updatedAt: now,
-  };
-
-  budgetsById.set(devBudget.budgetId, devBudget);
-  budgetIdsByApiKey.set(devBudget.apiKey, devBudget.budgetId);
+  });
 }
 
-if (process.env.NODE_ENV !== "production") {
-  seedDevBudget();
-}
+await (async () => {
+  if (process.env.NODE_ENV !== "production") {
+    await seedDevBudget();
+  }
+})();
 
-function getBudgetByApiKey(apiKey: string | undefined) {
+async function getBudgetByApiKey(apiKey: string | undefined) {
   if (!apiKey) {
     throw new HTTPException(401, {
       message: "Missing X-API-Key header",
@@ -130,9 +239,26 @@ function getBudgetByApiKey(apiKey: string | undefined) {
   const budgetId = budgetIdsByApiKey.get(apiKey);
 
   if (!budgetId) {
-    throw new HTTPException(403, {
-      message: "Invalid API key",
+    const databaseBudget = await getBudgetByApiKeyFromDatabase(apiKey);
+
+    if (!databaseBudget) {
+      throw new HTTPException(403, {
+        message: "Invalid API key",
+      });
+    }
+
+    const rememberedBudget = rememberBudget({
+      ...databaseBudget,
+      apiKey,
     });
+
+    if (rememberedBudget.status !== "active") {
+      throw new HTTPException(403, {
+        message: `Budget is not active (${rememberedBudget.status})`,
+      });
+    }
+
+    return rememberedBudget;
   }
 
   const budget = budgetsById.get(budgetId);
@@ -163,7 +289,25 @@ function ensureSufficientBudget(
   }
 }
 
-function debitBudget(budget: BudgetRecord, amountUsdcMicros: number) {
+async function debitBudget(budget: BudgetRecord, amountUsdcMicros: number) {
+  if (isDatabaseEnabled()) {
+    const databaseBudget = await debitBudgetInDatabase(
+      budget.budgetId,
+      amountUsdcMicros
+    );
+
+    if (databaseBudget) {
+      return rememberBudget({
+        ...databaseBudget,
+        apiKey: budget.apiKey,
+      });
+    }
+
+    throw new HTTPException(402, {
+      message: `Insufficient budget: requires ${amountUsdcMicros} micro-USDC, has ${budget.balanceUsdcMicros}`,
+    });
+  }
+
   const nextBalance = budget.balanceUsdcMicros - amountUsdcMicros;
   const updatedBudget: BudgetRecord = {
     ...budget,
@@ -172,11 +316,10 @@ function debitBudget(budget: BudgetRecord, amountUsdcMicros: number) {
     updatedAt: new Date().toISOString(),
   };
 
-  budgetsById.set(updatedBudget.budgetId, updatedBudget);
-  return updatedBudget;
+  return rememberBudget(updatedBudget);
 }
 
-function recordUsageEvent(input: {
+async function recordUsageEvent(input: {
   budget: BudgetRecord | null;
   endpointPath: string;
   method: string;
@@ -186,6 +329,22 @@ function recordUsageEvent(input: {
   callerType?: "human" | "agent";
   paymentTxSignature?: string | null;
 }) {
+  if (input.budget) {
+    const persistedEvent = await recordUsageEventInDatabase({
+      budget: input.budget,
+      endpointPath: input.endpointPath,
+      method: input.method,
+      statusCode: input.statusCode,
+      billedUsdcMicros: input.billedUsdcMicros,
+      requestId: input.requestId ?? input.paymentTxSignature ?? null,
+      callerType: input.callerType ?? "human",
+    });
+
+    if (persistedEvent) {
+      return persistedEvent;
+    }
+  }
+
   const event: UsageEventRecord = {
     eventId: randomUUID(),
     budgetId: input.budget?.budgetId ?? "agent-payment",
@@ -319,7 +478,114 @@ function createApiKey() {
   return `ak_${randomUUID().replaceAll("-", "")}`;
 }
 
-function upsertBudgetFromDodo(payload: DodoSubscriptionPayload) {
+async function fetchWalletSummaryFromPublisher(input: {
+  address: string;
+  cluster: string;
+}) {
+  const target = new URL("/api/wallet-summary", PUBLISHER_ORIGIN);
+  target.searchParams.set("address", input.address);
+  target.searchParams.set("cluster", input.cluster);
+
+  const response = await fetch(target, {
+    method: "GET",
+    headers: {
+      accept: "application/json",
+    },
+  });
+
+  const body = await response.text();
+
+  if (!response.ok) {
+    throw new HTTPException(502, {
+      message: `Publisher wallet-summary failed with ${response.status}: ${body}`,
+    });
+  }
+
+  return {
+    response,
+    body,
+    data: JSON.parse(body) as WalletSummaryApiResponse,
+  };
+}
+
+function shapePublisherResponse(
+  slug: string,
+  data: WalletSummaryApiResponse
+): WalletSummaryApiResponse | Record<string, unknown> {
+  if (slug === "recent-activity") {
+    return {
+      address: data.address,
+      shortAddress: data.shortAddress,
+      cluster: data.cluster,
+      explorerUrl: data.explorerUrl,
+      recentSignatureCount: data.recentSignatureCount,
+      recentSignatures: data.recentSignatures,
+      summary:
+        data.recentSignatureCount > 0
+          ? `Wallet ${data.shortAddress} has ${data.recentSignatureCount} recent transactions available for review on ${data.cluster}.`
+          : `Wallet ${data.shortAddress} has no recent transactions available for review on ${data.cluster}.`,
+    };
+  }
+
+  if (slug === "risk-flags") {
+    const riskFlags: string[] = [];
+
+    if (data.solBalance === 0) {
+      riskFlags.push("zero_sol_balance");
+    }
+
+    if (data.recentSignatureCount === 0) {
+      riskFlags.push("no_recent_activity");
+    } else if (data.recentSignatureCount < 3) {
+      riskFlags.push("low_recent_activity_signal");
+    }
+
+    return {
+      address: data.address,
+      shortAddress: data.shortAddress,
+      cluster: data.cluster,
+      riskLevel: riskFlags.length >= 2 ? "medium" : "low",
+      riskFlags,
+      summary:
+        riskFlags.length > 0
+          ? `Wallet ${data.shortAddress} triggered ${riskFlags.length} heuristic risk flags on ${data.cluster}.`
+          : `Wallet ${data.shortAddress} did not trigger heuristic risk flags on ${data.cluster}.`,
+    };
+  }
+
+  return data;
+}
+
+async function fetchPublisherToolResponse(input: {
+  slug: string;
+  address: string;
+  cluster: string;
+}): Promise<{
+  statusCode: number;
+  data: PublisherToolResponse;
+}> {
+  if (input.slug === "holder-distribution") {
+    return {
+      statusCode: 200,
+      data: await fetchHolderDistribution({
+        address: input.address,
+        cluster: input.cluster,
+      }),
+    };
+  }
+
+  const upstream = await fetchWalletSummaryFromPublisher({
+    address: input.address,
+    cluster: input.cluster,
+  });
+
+  return {
+    statusCode: upstream.response.status,
+    data: shapePublisherResponse(input.slug, upstream.data),
+  };
+}
+
+async function upsertBudgetFromDodo(payload: DodoSubscriptionPayload) {
   const subscriptionId = payload.data?.subscription_id;
   const ownerEmail = payload.data?.customer?.email;
 
@@ -333,6 +599,18 @@ function upsertBudgetFromDodo(payload: DodoSubscriptionPayload) {
     throw new HTTPException(400, {
       message: "Missing data.customer.email in webhook payload",
     });
+  }
+
+  if (isDatabaseEnabled()) {
+    const databaseBudget = await upsertBudgetFromDodoInDatabase(payload, {
+      publisherOrigin: PUBLISHER_ORIGIN,
+      solanaRecipient: DEV_SOLANA_RECIPIENT,
+      defaultBudgetRefillUsdcMicros: DEFAULT_BUDGET_REFILL_USDC_MICROS,
+    });
+
+    if (databaseBudget) {
+      return rememberBudget(databaseBudget);
+    }
   }
 
   const existingBudgetId = budgetIdsBySubscription.get(subscriptionId);
@@ -381,17 +659,14 @@ function upsertBudgetFromDodo(payload: DodoSubscriptionPayload) {
         updatedAt: now,
       };
 
-  budgetsById.set(budget.budgetId, budget);
-  budgetIdsBySubscription.set(subscriptionId, budget.budgetId);
-  budgetIdsByApiKey.set(budget.apiKey, budget.budgetId);
-
-  return budget;
+  return rememberBudget(budget);
 }
 
 app.get("/health", (c) => {
   return c.json({
     ok: true,
     service: "gateway",
+    budgetPersistence: isDatabaseEnabled() ? "postgres" : "memory",
     publisherOrigin: PUBLISHER_ORIGIN,
     solanaRpcUrl: SOLANA_RPC_URL,
     solanaRecipient: DEV_SOLANA_RECIPIENT,
@@ -427,7 +702,7 @@ app.all("/p/:slug", async (c) => {
   }
 
   const isHumanCall = Boolean(apiKey);
-  const budget = isHumanCall ? getBudgetByApiKey(apiKey) : null;
+  const budget = isHumanCall ? await getBudgetByApiKey(apiKey) : null;
   const verifiedPayment = isHumanCall
     ? null
     : solanaTxSignature
@@ -444,44 +719,35 @@ app.all("/p/:slug", async (c) => {
     ensureSufficientBudget(budget, WALLET_SUMMARY_CALL_COST_USDC_MICROS);
   }
 
-  const target = new URL("/api/wallet-summary", PUBLISHER_ORIGIN);
-  target.searchParams.set("address", address);
-  target.searchParams.set("cluster", cluster);
-
-  const response = await fetch(target, {
-    method: c.req.method,
-    headers: {
-      accept: c.req.header("accept") ?? "application/json",
-    },
+  const toolResponse = await fetchPublisherToolResponse({
+    slug,
+    address,
+    cluster,
   });
-
-  const body = await response.text();
+  const responseBody = toolResponse.data;
+  const body = JSON.stringify(responseBody);
   const updatedBudget =
-    response.ok && budget
-      ? debitBudget(budget, WALLET_SUMMARY_CALL_COST_USDC_MICROS)
+    budget
+      ? await debitBudget(budget, WALLET_SUMMARY_CALL_COST_USDC_MICROS)
       : budget;
   const consumedPayment =
-    response.ok && verifiedPayment ? markPaymentConsumed(verifiedPayment) : null;
-  const usageEvent =
-    response.ok
-      ? recordUsageEvent({
-          budget: updatedBudget,
-          endpointPath: "/p/wallet-summary",
-          method: c.req.method,
-          statusCode: response.status,
-          billedUsdcMicros: WALLET_SUMMARY_CALL_COST_USDC_MICROS,
-          requestId,
-          callerType: budget ? "human" : "agent",
-          paymentTxSignature: consumedPayment?.txSignature ?? null,
-        })
-      : null;
+    verifiedPayment ? markPaymentConsumed(verifiedPayment) : null;
+  const usageEvent = await recordUsageEvent({
+    budget: updatedBudget,
+    endpointPath: `/p/${slug}`,
+    method: c.req.method,
+    statusCode: toolResponse.statusCode,
+    billedUsdcMicros: WALLET_SUMMARY_CALL_COST_USDC_MICROS,
+    requestId,
+    callerType: budget ? "human" : "agent",
+    paymentTxSignature: consumedPayment?.txSignature ?? null,
+  });
 
   return new Response(body, {
-    status: response.status,
+    status: toolResponse.statusCode,
     headers: {
-      "content-type":
-        response.headers.get("content-type") ?? "application/json",
-      "x-gateway-proxy": "wallet-summary",
+      "content-type": "application/json",
+      "x-gateway-proxy": slug,
       "x-publisher-origin": PUBLISHER_ORIGIN,
       "x-budget-id": updatedBudget?.budgetId ?? "agent-payment",
       "x-budget-owner": updatedBudget?.ownerEmail ?? "agent@local",
@@ -512,7 +778,7 @@ app.post("/webhooks/dodo", async (c) => {
     });
   }
 
-  const budget = upsertBudgetFromDodo(payload);
+  const budget = await upsertBudgetFromDodo(payload);
 
   return c.json({
     ok: true,
@@ -526,10 +792,12 @@ app.post("/webhooks/dodo", async (c) => {
   });
 });
 
-app.get("/dev/budgets", (c) => {
-  const budgets = Array.from(budgetsById.values()).map((budget) => ({
+app.get("/dev/budgets", async (c) => {
+  const databaseBudgets = await listBudgetsFromDatabase();
+  const budgetsSource = databaseBudgets ?? Array.from(budgetsById.values());
+  const budgets = budgetsSource.map((budget) => ({
     ...budget,
-    apiKeyPreview: `${budget.apiKey.slice(0, 8)}...`,
+    apiKeyPreview: budget.apiKey ? `${budget.apiKey.slice(0, 8)}...` : null,
   }));
 
   return c.json({
@@ -538,10 +806,15 @@ app.get("/dev/budgets", (c) => {
   });
 });
 
-app.get("/dev/usage-events", (c) => {
+app.get("/dev/usage-events", async (c) => {
+  const databaseUsageEvents = await listUsageEventsFromDatabase();
+  const events = [...(databaseUsageEvents ?? []), ...usageEvents]
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .slice(0, 100);
+
   return c.json({
-    count: usageEvents.length,
-    usageEvents,
+    count: events.length,
+    usageEvents: events,
   });
 });
 
@@ -550,6 +823,244 @@ app.get("/dev/payments", (c) => {
     count: verifiedPaymentsBySignature.size,
     payments: Array.from(verifiedPaymentsBySignature.values()),
   });
+});
+
+app.post("/api/runs", async (c) => {
+  const body = (await c.req.json()) as {
+    prompt?: string;
+    publisherSlug?: string;
+    targetAddress?: string;
+    cluster?: string;
+  };
+
+  if (!body.prompt) {
+    throw new HTTPException(400, {
+      message: "Missing prompt in request body",
+    });
+  }
+
+  if (!body.targetAddress) {
+    throw new HTTPException(400, {
+      message: "Missing targetAddress in request body",
+    });
+  }
+
+  const budget = await getBudgetByApiKey(c.req.header("x-api-key"));
+  ensureSufficientBudget(budget, WALLET_SUMMARY_CALL_COST_USDC_MICROS * 5);
+  const cluster = body.cluster ?? "devnet";
+  let currentBudget = budget;
+
+  const run = await startAgentRun({
+    prompt: body.prompt,
+    publisherSlug: body.publisherSlug,
+    targetAddress: body.targetAddress,
+    toolCallCostUsdcMicros: WALLET_SUMMARY_CALL_COST_USDC_MICROS,
+    executeWalletSummary: async (runId) => {
+      const walletSummary = await fetchWalletSummaryFromPublisher({
+        address: body.targetAddress!,
+        cluster,
+      });
+
+      currentBudget = await debitBudget(
+        currentBudget,
+        WALLET_SUMMARY_CALL_COST_USDC_MICROS
+      );
+      await recordUsageEvent({
+        budget: currentBudget,
+        endpointPath: "/p/wallet-summary",
+        method: "POST",
+        statusCode: 200,
+        billedUsdcMicros: WALLET_SUMMARY_CALL_COST_USDC_MICROS,
+        requestId: runId,
+        callerType: "agent",
+      });
+
+      return walletSummary.data;
+    },
+    executeRecentActivity: async (runId) => {
+      const walletSummary = await fetchWalletSummaryFromPublisher({
+        address: body.targetAddress!,
+        cluster,
+      });
+
+      currentBudget = await debitBudget(
+        currentBudget,
+        WALLET_SUMMARY_CALL_COST_USDC_MICROS
+      );
+      await recordUsageEvent({
+        budget: currentBudget,
+        endpointPath: "/p/recent-activity",
+        method: "POST",
+        statusCode: 200,
+        billedUsdcMicros: WALLET_SUMMARY_CALL_COST_USDC_MICROS,
+        requestId: runId,
+        callerType: "agent",
+      });
+
+      return {
+        recentSignatureCount: walletSummary.data.recentSignatureCount,
+        summary:
+          walletSummary.data.recentSignatureCount > 0
+            ? `Recent activity tool found ${walletSummary.data.recentSignatureCount} transactions for ${walletSummary.data.shortAddress}.`
+            : `Recent activity tool found no recent transactions for ${walletSummary.data.shortAddress}.`,
+      };
+    },
+    executeHolderDistribution: async (runId) => {
+      const distribution = await fetchHolderDistribution({
+        address: body.targetAddress!,
+        cluster,
+      });
+
+      currentBudget = await debitBudget(
+        currentBudget,
+        WALLET_SUMMARY_CALL_COST_USDC_MICROS
+      );
+      await recordUsageEvent({
+        budget: currentBudget,
+        endpointPath: "/p/holder-distribution",
+        method: "POST",
+        statusCode: 200,
+        billedUsdcMicros: WALLET_SUMMARY_CALL_COST_USDC_MICROS,
+        requestId: runId,
+        callerType: "agent",
+      });
+
+      return {
+        summary: distribution.summary,
+        source: distribution.source,
+        concentrationScore: distribution.concentrationScore,
+        top10Percentage: distribution.top10Percentage,
+        top20Percentage: distribution.top20Percentage,
+        sampledHolderAccounts: distribution.sampledHolderAccounts,
+      };
+    },
+    executeRiskFlags: async (runId) => {
+      const walletSummary = await fetchWalletSummaryFromPublisher({
+        address: body.targetAddress!,
+        cluster,
+      });
+
+      currentBudget = await debitBudget(
+        currentBudget,
+        WALLET_SUMMARY_CALL_COST_USDC_MICROS
+      );
+      await recordUsageEvent({
+        budget: currentBudget,
+        endpointPath: "/p/risk-flags",
+        method: "POST",
+        statusCode: 200,
+        billedUsdcMicros: WALLET_SUMMARY_CALL_COST_USDC_MICROS,
+        requestId: runId,
+        callerType: "agent",
+      });
+
+      const response = shapePublisherResponse(
+        "risk-flags",
+        walletSummary.data
+      ) as {
+        riskLevel: "low" | "medium";
+        riskFlags: string[];
+        summary: string;
+      };
+
+      return {
+        riskFlags: response.riskFlags,
+        riskLevel: response.riskLevel,
+        summary: response.summary,
+      };
+    },
+    executeLlmAnalysis: async (runId, context) => {
+      const analysis = await generateLlmAnalysis({
+        prompt: body.prompt!,
+        targetAddress: body.targetAddress!,
+        walletSummary: context.walletSummary,
+        recentActivity: context.recentActivity,
+        holderDistribution: context.holderDistribution,
+        riskFlags: context.riskFlags,
+      });
+
+      currentBudget = await debitBudget(
+        currentBudget,
+        WALLET_SUMMARY_CALL_COST_USDC_MICROS
+      );
+      await recordUsageEvent({
+        budget: currentBudget,
+        endpointPath: "/internal/llm-analysis",
+        method: "POST",
+        statusCode: 200,
+        billedUsdcMicros: WALLET_SUMMARY_CALL_COST_USDC_MICROS,
+        requestId: runId,
+        callerType: "agent",
+      });
+
+      return analysis;
+    },
+  });
+
+  return c.json({
+    ok: true,
+    run,
+  });
+});
+
+app.get("/api/runs", (c) => {
+  const runs = fetchAgentRuns();
+  return c.json({
+    count: runs.length,
+    runs,
+  });
+});
+
+app.get("/api/runs/:id", (c) => {
+  const run = fetchAgentRun(c.req.param("id"));
+
+  if (!run) {
+    return c.json({ error: "Run not found" }, 404);
+  }
+
+  return c.json({
+    ok: true,
+    run,
+  });
+});
+
+app.get("/api/runs/:id/report", (c) => {
+  const run = fetchAgentRun(c.req.param("id"));
+
+  if (!run) {
+    return c.json({ error: "Run not found" }, 404);
+  }
+
+  return c.json({
+    ok: true,
+    report: formatRunReport(run),
+  });
+});
+
+app.get("/demo", (c) => {
+  return c.html(
+    renderDemoHomeHtml({
+      runs: formatRunListForDemo(),
+      defaultApiKey: DEV_API_KEY,
+      defaultTargetAddress: DEV_SOLANA_RECIPIENT,
+    })
+  );
+});
+
+app.get("/demo/runs/:id", (c) => {
+  const run = fetchAgentRun(c.req.param("id"));
+
+  if (!run) {
+    return c.html("<h1>Run not found</h1>", 404);
+  }
+
+  const report = formatRunReport(run);
+
+  if (!report) {
+    return c.html("<h1>Report unavailable</h1>", 404);
+  }
+
+  return c.html(renderRunReportHtml(report));
 });
 
 app.post("/verify/solana-tx", async (c) => {

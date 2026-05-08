@@ -4,7 +4,12 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "echo 'agent runtime not wired yet'",
+    "dev": "tsx watch src/index.ts",
     "build": "echo 'agent build not wired yet'"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.8.3"
   }
 }
