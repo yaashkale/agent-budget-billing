@@ -37,6 +37,7 @@ import {
   type HolderDistributionResponse,
 } from "./publishers/holder-distribution.js";
 import { generateLlmAnalysis } from "./publishers/llm-analysis.js";
+import { startSettlementWorker } from "./settlement/worker.js";
 
 const PORT = Number(process.env.PORT ?? 8787);
 const PUBLISHER_ORIGIN =
@@ -229,6 +230,8 @@ await (async () => {
     await seedDevBudget();
   }
 })();
+
+startSettlementWorker();
 
 async function getBudgetByApiKey(apiKey: string | undefined) {
   if (!apiKey) {

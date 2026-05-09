@@ -1,0 +1,300 @@
+{
+  "address": "92xJg6zJM8Rh8bPDnpuX1PxSnVJ1dojodsE1dSJqNAHh",
+  "metadata": {
+    "name": "gateway_settlement",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Created with Anchor"
+  },
+  "instructions": [
+    {
+      "name": "commit_window",
+      "discriminator": [
+        212,
+        136,
+        159,
+        180,
+        113,
+        80,
+        194,
+        103
+      ],
+      "accounts": [
+        {
+          "name": "publisher",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  117,
+                  98,
+                  108,
+                  105,
+                  115,
+                  104,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "publisher.publisher_id",
+                "account": "Publisher"
+              }
+            ]
+          }
+        },
+        {
+          "name": "window",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  119,
+                  105,
+                  110,
+                  100,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "publisher"
+              },
+              {
+                "kind": "arg",
+                "path": "window_index"
+              }
+            ]
+          }
+        },
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "window_index",
+          "type": "u64"
+        },
+        {
+          "name": "merkle_root",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "prev_window_hash",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "total_calls",
+          "type": "u64"
+        },
+        {
+          "name": "total_revenue_usdc",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "init_publisher",
+      "discriminator": [
+        101,
+        102,
+        35,
+        176,
+        210,
+        160,
+        28,
+        154
+      ],
+      "accounts": [
+        {
+          "name": "publisher",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  117,
+                  98,
+                  108,
+                  105,
+                  115,
+                  104,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "publisher_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "publisher_id",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Publisher",
+      "discriminator": [
+        86,
+        152,
+        93,
+        215,
+        234,
+        89,
+        232,
+        104
+      ]
+    },
+    {
+      "name": "Window",
+      "discriminator": [
+        66,
+        77,
+        66,
+        242,
+        153,
+        13,
+        1,
+        69
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "Unauthorized",
+      "msg": "Signer is not the publisher authority"
+    },
+    {
+      "code": 6001,
+      "name": "WindowIndexMismatch",
+      "msg": "Window index does not match the publisher's current window index"
+    },
+    {
+      "code": 6002,
+      "name": "WindowOverflow",
+      "msg": "Window index overflow"
+    }
+  ],
+  "types": [
+    {
+      "name": "Publisher",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "publisher_id",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "current_window_index",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Window",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "publisher",
+            "type": "pubkey"
+          },
+          {
+            "name": "window_index",
+            "type": "u64"
+          },
+          {
+            "name": "merkle_root",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "prev_window_hash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "total_calls",
+            "type": "u64"
+          },
+          {
+            "name": "total_revenue_usdc",
+            "type": "u64"
+          },
+          {
+            "name": "committed_at",
+            "type": "i64"
+          }
+        ]
+      }
+    }
+  ]
+}
