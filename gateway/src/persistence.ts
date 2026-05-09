@@ -66,6 +66,36 @@ export type SettlementWindowEventRecord = {
   createdAt: string;
 };
 
+export type UsageEventProofRecord = {
+  eventId: string;
+  publisherId: string;
+  settlementWindowId: string | null;
+  apiKeyId: string | null;
+  x402PaymentId: string | null;
+  callerType: "human" | "agent";
+  endpointPath: string;
+  statusCode: number;
+  billedUsdcMicros: number;
+  createdAt: string;
+};
+
+export type CommittedSettlementWindowRecord = {
+  id: string;
+  publisherId: string;
+  windowIndex: bigint;
+  status: "open" | "closed_pending_commit" | "committed" | "failed";
+  startAt: string;
+  endAt: string;
+  closedAt: string | null;
+  merkleRoot: Buffer | null;
+  prevWindowHash: Buffer | null;
+  totalCalls: number;
+  totalRevenueUsdcMicros: number;
+  totalRevenueUsdCents: number;
+  onChainTxSignature: string | null;
+  onChainWindowPda: string | null;
+};
+
 const DEFAULT_PUBLISHER_SLUG =
   process.env.DEFAULT_PUBLISHER_SLUG ?? "publisher-0";
 const DATABASE_URL = process.env.DATABASE_URL ?? null;
@@ -940,6 +970,130 @@ export async function listEventsForWindow(windowId: string) {
     billedUsdcMicros: Number(row.billed_usdc_micros),
     createdAt: parseIsoTimestamp(row.created_at) ?? "",
   })) satisfies Array<SettlementWindowEventRecord>;
+}
+
+export async function fetchUsageEventById(eventId: string) {
+  if (!pool) {
+    return null;
+  }
+
+  const result = await pool.query<{
+    event_id: string;
+    publisher_id: string;
+    settlement_window_id: string | null;
+    api_key_id: string | null;
+    x402_payment_id: string | null;
+    caller_type: "human" | "agent";
+    endpoint_path: string;
+    status_code: number;
+    billed_usdc_micros: string | number;
+    created_at: string | Date;
+  }>(
+    `
+      SELECT
+        id AS event_id,
+        publisher_id,
+        settlement_window_id,
+        api_key_id,
+        x402_payment_id,
+        caller_type,
+        endpoint_path,
+        status_code,
+        billed_usdc_micros,
+        created_at
+      FROM usage_events
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [eventId]
+  );
+
+  const row = result.rows[0];
+
+  if (!row) {
+    return null;
+  }
+
+  return {
+    eventId: row.event_id,
+    publisherId: row.publisher_id,
+    settlementWindowId: row.settlement_window_id,
+    apiKeyId: row.api_key_id,
+    x402PaymentId: row.x402_payment_id,
+    callerType: row.caller_type,
+    endpointPath: row.endpoint_path,
+    statusCode: row.status_code,
+    billedUsdcMicros: Number(row.billed_usdc_micros),
+    createdAt: parseIsoTimestamp(row.created_at) ?? "",
+  } satisfies UsageEventProofRecord;
+}
+
+export async function fetchSettlementWindowById(windowId: string) {
+  if (!pool) {
+    return null;
+  }
+
+  const result = await pool.query<{
+    id: string;
+    publisher_id: string;
+    window_index: string;
+    status: CommittedSettlementWindowRecord["status"];
+    start_at: string | Date;
+    end_at: string | Date;
+    closed_at: string | Date | null;
+    merkle_root: Buffer | null;
+    prev_window_hash: Buffer | null;
+    total_calls: string | number;
+    total_revenue_usdc_micros: string | number;
+    total_revenue_usd_cents: string | number;
+    on_chain_tx_signature: string | null;
+    on_chain_window_pda: string | null;
+  }>(
+    `
+      SELECT
+        id,
+        publisher_id,
+        window_index,
+        status,
+        start_at,
+        end_at,
+        closed_at,
+        merkle_root,
+        prev_window_hash,
+        total_calls,
+        total_revenue_usdc_micros,
+        total_revenue_usd_cents,
+        on_chain_tx_signature,
+        on_chain_window_pda
+      FROM settlement_windows
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [windowId]
+  );
+
+  const row = result.rows[0];
+
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    publisherId: row.publisher_id,
+    windowIndex: BigInt(row.window_index),
+    status: row.status,
+    startAt: parseIsoTimestamp(row.start_at) ?? "",
+    endAt: parseIsoTimestamp(row.end_at) ?? "",
+    closedAt: parseIsoTimestamp(row.closed_at),
+    merkleRoot: row.merkle_root,
+    prevWindowHash: row.prev_window_hash,
+    totalCalls: Number(row.total_calls),
+    totalRevenueUsdcMicros: Number(row.total_revenue_usdc_micros),
+    totalRevenueUsdCents: Number(row.total_revenue_usd_cents),
+    onChainTxSignature: row.on_chain_tx_signature,
+    onChainWindowPda: row.on_chain_window_pda,
+  } satisfies CommittedSettlementWindowRecord;
 }
 
 export async function markWindowClosedPendingCommit(windowId: string) {

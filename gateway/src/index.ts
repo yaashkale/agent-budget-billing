@@ -15,11 +15,14 @@ import {
   startAgentRun,
 } from "./agent-runtime.js";
 import {
+  fetchSettlementWindowById,
+  fetchUsageEventById,
   debitBudgetInDatabase,
   getBudgetByApiKeyFromDatabase,
   initializeBudgetPersistence,
   isDatabaseEnabled,
   listBudgetsFromDatabase,
+  listEventsForWindow,
   listUsageEventsFromDatabase,
   type BudgetRecord,
   type DodoSubscriptionPayload,
@@ -37,6 +40,12 @@ import {
   type HolderDistributionResponse,
 } from "./publishers/holder-distribution.js";
 import { generateLlmAnalysis } from "./publishers/llm-analysis.js";
+import {
+  buildMerkleProof,
+  buildMerkleRoot,
+  hashLeaf,
+  verifyMerkleProof,
+} from "./settlement/merkle.js";
 import { startSettlementWorker } from "./settlement/worker.js";
 
 const PORT = Number(process.env.PORT ?? 8787);
@@ -52,6 +61,8 @@ const DEFAULT_BUDGET_REFILL_USDC_MICROS = Number(
 const WALLET_SUMMARY_CALL_COST_USDC_MICROS = Number(
   process.env.WALLET_SUMMARY_CALL_COST_USDC_MICROS ?? 50_000
 );
+const DEFAULT_PUBLISHER_SLUG =
+  process.env.DEFAULT_PUBLISHER_SLUG ?? "publisher-0";
 const DEV_SOLANA_RECIPIENT =
   process.env.DEV_SOLANA_RECIPIENT ??
   "818knEVSxm1R36WYPRjKBtzwa1PjaQNf412cZK2HE38L";
@@ -97,6 +108,14 @@ type PublisherToolResponse =
 
 function formatUsdMicros(usdcMicros: number) {
   return `$${(usdcMicros / 1_000_000).toFixed(2)}`;
+}
+
+function toHex(bytes: Uint8Array | Buffer | null) {
+  if (!bytes) {
+    return null;
+  }
+
+  return Buffer.from(bytes).toString("hex");
 }
 
 function formatRunReport(run: ReturnType<typeof fetchAgentRun>) {
@@ -1045,6 +1064,123 @@ app.get("/api/runs/:id/report", (c) => {
   return c.json({
     ok: true,
     report: formatRunReport(run),
+  });
+});
+
+app.get("/api/proof/:eventId", async (c) => {
+  const eventId = c.req.param("eventId");
+  const event = await fetchUsageEventById(eventId);
+
+  if (!event) {
+    return c.json({ error: "Usage event not found" }, 404);
+  }
+
+  if (!event.settlementWindowId) {
+    return c.json(
+      {
+        error: "Usage event has not been assigned to a settlement window",
+      },
+      409
+    );
+  }
+
+  const window = await fetchSettlementWindowById(event.settlementWindowId);
+
+  if (!window) {
+    return c.json({ error: "Settlement window not found" }, 404);
+  }
+
+  if (window.status !== "committed" || !window.merkleRoot) {
+    return c.json(
+      {
+        error: "Settlement window has not been committed on-chain yet",
+        window: {
+          id: window.id,
+          windowIndex: window.windowIndex.toString(),
+          status: window.status,
+        },
+      },
+      409
+    );
+  }
+
+  const windowEvents = await listEventsForWindow(window.id);
+  const eventIndex = windowEvents.findIndex(
+    (windowEvent) => windowEvent.eventId === event.eventId
+  );
+
+  if (eventIndex === -1) {
+    return c.json(
+      {
+        error: "Usage event is missing from its linked settlement window",
+      },
+      500
+    );
+  }
+
+  const leaves = windowEvents.map((windowEvent) =>
+    hashLeaf({
+      eventId: windowEvent.eventId,
+      publisherId: DEFAULT_PUBLISHER_SLUG,
+      timestampMs: new Date(windowEvent.createdAt).getTime(),
+      callerType: windowEvent.callerType,
+      apiKeyId: windowEvent.apiKeyId,
+      x402PaymentId: windowEvent.x402PaymentId,
+      endpointPath: windowEvent.endpointPath,
+      statusCode: windowEvent.statusCode,
+      billedUsdcMicros: windowEvent.billedUsdcMicros,
+    })
+  );
+
+  const leaf = leaves[eventIndex];
+  const proof = buildMerkleProof(leaves, eventIndex);
+  const recomputedRoot = buildMerkleRoot(leaves);
+  const proofValid = verifyMerkleProof(
+    leaf,
+    proof,
+    Uint8Array.from(window.merkleRoot)
+  );
+
+  return c.json({
+    ok: true,
+    proof: {
+      eventId: event.eventId,
+      eventIndex,
+      leafHashHex: toHex(leaf),
+      merkleRootHex: toHex(window.merkleRoot),
+      recomputedRootHex: toHex(recomputedRoot),
+      proofValid,
+      steps: proof.map((step) => ({
+        position: step.position,
+        siblingHex: toHex(step.sibling),
+      })),
+    },
+    event: {
+      eventId: event.eventId,
+      publisherId: event.publisherId,
+      callerType: event.callerType,
+      endpointPath: event.endpointPath,
+      statusCode: event.statusCode,
+      billedUsdcMicros: event.billedUsdcMicros,
+      createdAt: event.createdAt,
+    },
+    window: {
+      id: window.id,
+      windowIndex: window.windowIndex.toString(),
+      status: window.status,
+      totalCalls: window.totalCalls,
+      totalRevenueUsdcMicros: window.totalRevenueUsdcMicros,
+      totalRevenueUsdCents: window.totalRevenueUsdCents,
+      startAt: window.startAt,
+      endAt: window.endAt,
+      closedAt: window.closedAt,
+      onChainTxSignature: window.onChainTxSignature,
+      onChainWindowPda: window.onChainWindowPda,
+      explorerUrl: window.onChainTxSignature
+        ? `https://explorer.solana.com/tx/${window.onChainTxSignature}?cluster=devnet`
+        : null,
+      prevWindowHashHex: toHex(window.prevWindowHash),
+    },
   });
 });
 
