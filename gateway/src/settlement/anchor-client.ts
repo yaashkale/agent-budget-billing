@@ -80,3 +80,12 @@ export function deriveWindowPda(
     PROGRAM_ID
   );
 }
+
+export async function fetchPublisherCurrentWindowIndex(
+  publisherIdBytes: Uint8Array
+) {
+  const program = getAnchorProgram();
+  const [publisherPda] = derivePublisherPda(publisherIdBytes);
+  const publisherAccount = await program.account.publisher.fetch(publisherPda);
+  return BigInt(publisherAccount.currentWindowIndex.toString());
+}

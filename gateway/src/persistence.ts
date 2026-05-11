@@ -1,5 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Pool } from "pg";
+import {
+  fetchPublisherCurrentWindowIndex,
+  isAnchorEnabled,
+} from "./settlement/anchor-client.js";
+import { computePublisherIdBytes } from "./settlement/merkle.js";
 
 export type BudgetRecord = {
   budgetId: string;
@@ -567,7 +572,30 @@ export async function upsertBudgetFromDodoInDatabase(
       ]
     );
 
-    return toBudgetRecord(updatedBudget.rows[0]);
+    const apiKey = `ak_${randomUUID().replaceAll("-", "")}`;
+
+    await pool.query(
+      `
+        INSERT INTO api_keys (
+          publisher_id,
+          subscription_id,
+          key_prefix,
+          key_hash,
+          label,
+          status
+        )
+        VALUES ($1, $2, $3, $4, $5, 'active')
+      `,
+      [
+        publisherId,
+        subscriptionId,
+        getApiKeyPrefix(apiKey),
+        hashApiKey(apiKey),
+        `subscriber-${ownerEmail}`,
+      ]
+    );
+
+    return toBudgetRecord(updatedBudget.rows[0], apiKey);
   }
 
   const insertedBudget = await pool.query<DatabaseBudgetRow>(
@@ -692,9 +720,16 @@ export async function recordUsageEventInDatabase(input: {
     return null;
   }
 
+  const minimumWindowIndex = isAnchorEnabled()
+    ? await fetchPublisherCurrentWindowIndex(
+        computePublisherIdBytes(DEFAULT_PUBLISHER_SLUG)
+      )
+    : 0n;
+
   const openWindow = await getOrCreateOpenWindow({
     publisherId: input.budget.publisherId,
     windowSeconds: 60,
+    minimumWindowIndex,
   });
 
   const result = await pool.query<{
@@ -824,6 +859,7 @@ export async function listUsageEventsFromDatabase(): Promise<
 export async function getOrCreateOpenWindow(input: {
   publisherId: string;
   windowSeconds: number;
+  minimumWindowIndex?: bigint;
 }) {
   if (!pool) {
     return null;
@@ -840,11 +876,12 @@ export async function getOrCreateOpenWindow(input: {
       FROM settlement_windows
       WHERE publisher_id = $1
         AND status = 'open'
+        AND window_index >= $2::bigint
         AND end_at > NOW()
       ORDER BY window_index DESC
       LIMIT 1
     `,
-    [input.publisherId]
+    [input.publisherId, (input.minimumWindowIndex ?? 0n).toString()]
   );
 
   if (openWindow.rows[0]) {
@@ -860,11 +897,11 @@ export async function getOrCreateOpenWindow(input: {
 
   const nextWindowIndexResult = await pool.query<{ next_index: string }>(
     `
-      SELECT COALESCE(MAX(window_index) + 1, 0) AS next_index
+      SELECT GREATEST(COALESCE(MAX(window_index) + 1, 0), $2::bigint) AS next_index
       FROM settlement_windows
       WHERE publisher_id = $1
     `,
-    [input.publisherId]
+    [input.publisherId, (input.minimumWindowIndex ?? 0n).toString()]
   );
 
   const nextWindowIndex = BigInt(nextWindowIndexResult.rows[0]?.next_index ?? "0");
