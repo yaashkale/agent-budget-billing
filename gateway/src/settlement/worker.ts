@@ -104,7 +104,7 @@ async function tick() {
             new BN(totalCalls),
             new BN(totalRevenueUsdcMicros)
           )
-          .accounts({
+          .accountsStrict({
             publisher: publisherPda,
             window: windowPda,
             authority: program.provider.publicKey,

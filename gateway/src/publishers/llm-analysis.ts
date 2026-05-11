@@ -16,8 +16,8 @@ export type LlmAnalysisInput = {
   };
   holderDistribution: {
     summary: string;
-    source: "mock" | "helius";
-    concentrationScore: "low" | "medium" | "high";
+    source: "mock" | "helius" | "unavailable";
+    concentrationScore: "low" | "medium" | "high" | "unavailable";
     top10Percentage: number;
     top20Percentage: number;
     sampledHolderAccounts: number;
@@ -51,6 +51,8 @@ function buildFallbackAnalysis(input: LlmAnalysisInput): LlmAnalysisResponse {
   const walletRiskTone =
     input.riskFlags.riskLevel === "medium"
       ? "low-context"
+      : input.holderDistribution.concentrationScore === "unavailable"
+        ? "limited-signal"
       : input.holderDistribution.concentrationScore === "high"
         ? "concentrated"
         : "limited-risk";
@@ -58,6 +60,8 @@ function buildFallbackAnalysis(input: LlmAnalysisInput): LlmAnalysisResponse {
   const executiveSummary =
     walletRiskTone === "low-context"
       ? `This wallet looks low-context based on the currently paid toolset: balance and activity are thin enough that you should treat it as an under-explained counterparty.`
+      : walletRiskTone === "limited-signal"
+        ? `This target does not show obvious activity risk, but holder concentration could not be derived for the current target shape, so confidence is reduced.`
       : walletRiskTone === "concentrated"
         ? `This target does not show obvious activity risk, but the holder-distribution signal suggests concentrated ownership that could matter before acting.`
         : `This target does not show obvious heuristic risk from the current tool bundle, though confidence is still limited by the narrow scope of inputs.`;
@@ -65,7 +69,9 @@ function buildFallbackAnalysis(input: LlmAnalysisInput): LlmAnalysisResponse {
   const findings = [
     `Wallet summary: ${input.walletSummary.summary}`,
     `Recent activity: ${input.recentActivity.summary}`,
-    `Holder distribution: top 10 holders control ${input.holderDistribution.top10Percentage}% of observed supply (${input.holderDistribution.source} source).`,
+    input.holderDistribution.source === "unavailable"
+      ? `Holder distribution: unavailable for the current target; the run continued with reduced concentration confidence.`
+      : `Holder distribution: top 10 holders control ${input.holderDistribution.top10Percentage}% of observed supply (${input.holderDistribution.source} source).`,
     `Risk flags: ${
       input.riskFlags.riskFlags.length > 0
         ? input.riskFlags.riskFlags.join(", ")
@@ -76,6 +82,8 @@ function buildFallbackAnalysis(input: LlmAnalysisInput): LlmAnalysisResponse {
   const recommendation =
     input.riskFlags.riskLevel === "medium"
       ? "Ask for more context before acting: verify ownership history, related wallets, and any off-chain explanation for sparse activity."
+      : input.holderDistribution.concentrationScore === "unavailable"
+        ? "Treat this as a partial brief and, if concentration matters, rerun holder analysis on a token mint rather than a wallet address."
       : input.holderDistribution.concentrationScore === "high"
         ? "Validate whether major holder accounts belong to the same entity before treating the asset as broadly distributed."
         : "Use this as a first-pass signal only and enrich with more transaction history or token metadata before making a stronger call.";
@@ -83,7 +91,10 @@ function buildFallbackAnalysis(input: LlmAnalysisInput): LlmAnalysisResponse {
   return {
     source: "fallback",
     model: "deterministic-fallback",
-    summary: `Fallback analysis marked ${input.walletSummary.shortAddress} as ${input.riskFlags.riskLevel} risk with ${input.holderDistribution.concentrationScore} holder concentration.`,
+    summary:
+      input.holderDistribution.concentrationScore === "unavailable"
+        ? `Fallback analysis marked ${input.walletSummary.shortAddress} as ${input.riskFlags.riskLevel} risk with holder concentration unavailable for the current target.`
+        : `Fallback analysis marked ${input.walletSummary.shortAddress} as ${input.riskFlags.riskLevel} risk with ${input.holderDistribution.concentrationScore} holder concentration.`,
     executiveSummary,
     findings,
     recommendation,

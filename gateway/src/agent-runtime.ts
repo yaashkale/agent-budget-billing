@@ -7,7 +7,7 @@ import {
   markRunStarted,
   updateRunStep,
   type AgentRunRecord,
-} from "../../agent/src/index.js";
+} from "./agent-store.js";
 
 const DEFAULT_RUN_BUDGET_USDC_MICROS = Number(
   process.env.DEFAULT_RUN_BUDGET_USDC_MICROS ?? 5_000_000
@@ -27,8 +27,8 @@ type RecentActivityResult = {
 
 type HolderDistributionResult = {
   summary: string;
-  source: "mock" | "helius";
-  concentrationScore: "low" | "medium" | "high";
+  source: "mock" | "helius" | "unavailable";
+  concentrationScore: "low" | "medium" | "high" | "unavailable";
   top10Percentage: number;
   top20Percentage: number;
   sampledHolderAccounts: number;
@@ -168,7 +168,6 @@ export async function startAgentRun(input: {
       `Planner v0 completed five paid tool calls for ${walletSummary.shortAddress}.`,
       `Observed balance: ${walletSummary.solBalance} SOL.`,
       `Recent transactions seen: ${recentActivity.recentSignatureCount}.`,
-      `Top-10 holder concentration observed: ${holderDistribution.top10Percentage}%.`,
       walletSummary.summary,
       recentActivity.summary,
       holderDistribution.summary,

@@ -6,7 +6,7 @@ import {
   Connection,
   PublicKey,
 } from "@solana/web3.js";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { randomUUID } from "node:crypto";
 import {
@@ -23,6 +23,7 @@ import {
   isDatabaseEnabled,
   listBudgetsFromDatabase,
   listEventsForWindow,
+  listUsageEventsForRequestId,
   listUsageEventsFromDatabase,
   type BudgetRecord,
   type DodoSubscriptionPayload,
@@ -33,6 +34,8 @@ import {
 import {
   renderDemoHomeHtml,
   renderRunReportHtml,
+  type DemoBudgetView,
+  type RunReportView,
 } from "./report-surface.js";
 import {
   fetchHolderDistribution,
@@ -63,6 +66,15 @@ const WALLET_SUMMARY_CALL_COST_USDC_MICROS = Number(
 );
 const DEFAULT_PUBLISHER_SLUG =
   process.env.DEFAULT_PUBLISHER_SLUG ?? "publisher-0";
+const DEFAULT_DEMO_DODO_TOP_UP_USD_CENTS = Number(
+  process.env.DEFAULT_DEMO_DODO_TOP_UP_USD_CENTS ?? 5000
+);
+const DEFAULT_DEMO_DODO_SUBSCRIPTION_ID =
+  process.env.DEFAULT_DEMO_DODO_SUBSCRIPTION_ID ?? "sub_local_001";
+const DEFAULT_DEMO_DODO_EMAIL =
+  process.env.DEFAULT_DEMO_DODO_EMAIL ?? "hackathon@example.com";
+const DEFAULT_DEMO_DODO_NAME =
+  process.env.DEFAULT_DEMO_DODO_NAME ?? "Hackathon Demo Owner";
 const DEV_SOLANA_RECIPIENT =
   process.env.DEV_SOLANA_RECIPIENT ??
   "818knEVSxm1R36WYPRjKBtzwa1PjaQNf412cZK2HE38L";
@@ -118,10 +130,22 @@ function toHex(bytes: Uint8Array | Buffer | null) {
   return Buffer.from(bytes).toString("hex");
 }
 
-function formatRunReport(run: ReturnType<typeof fetchAgentRun>) {
+function formatApiKeyPreview(apiKey: string | null | undefined) {
+  if (!apiKey) {
+    return null;
+  }
+
+  return apiKey.includes("...") ? apiKey : `${apiKey.slice(0, 8)}...`;
+}
+
+async function formatRunReport(
+  run: ReturnType<typeof fetchAgentRun>
+): Promise<RunReportView | null> {
   if (!run) {
     return null;
   }
+
+  const verificationEvents = await listUsageEventsForRequestId(run.runId);
 
   const artifact = run.resultArtifact;
   const reportMarkdown = artifact
@@ -145,6 +169,16 @@ function formatRunReport(run: ReturnType<typeof fetchAgentRun>) {
         `- Remaining: ${formatUsdMicros(artifact.spendSummary.remainingUsdcMicros)}`,
         `- Paid tool calls: ${artifact.spendSummary.paidToolCalls}`,
         "",
+        "## Verification",
+        ...verificationEvents.map(
+          (item: Awaited<ReturnType<typeof listUsageEventsForRequestId>>[number]) =>
+            `- ${item.endpointPath}: /api/proof/${item.eventId}${
+              item.onChainTxSignature
+                ? ` (tx: https://explorer.solana.com/tx/${item.onChainTxSignature}?cluster=devnet)`
+                : ""
+            }`
+        ),
+        "",
         "## Sources",
         ...artifact.sources.map(
           (source) =>
@@ -166,6 +200,17 @@ function formatRunReport(run: ReturnType<typeof fetchAgentRun>) {
     recommendation: artifact?.recommendation ?? null,
     spendSummary: artifact?.spendSummary ?? null,
     sources: artifact?.sources ?? [],
+    verification: verificationEvents.map((item) => ({
+      eventId: item.eventId,
+      endpointPath: item.endpointPath,
+      billedUsdcMicros: item.billedUsdcMicros,
+      settlementWindowId: item.settlementWindowId,
+      settlementStatus: item.settlementStatus,
+      proofUrl: `/api/proof/${item.eventId}`,
+      explorerUrl: item.onChainTxSignature
+        ? `https://explorer.solana.com/tx/${item.onChainTxSignature}?cluster=devnet`
+        : null,
+    })),
     markdown: reportMarkdown,
   };
 }
@@ -183,6 +228,35 @@ function formatRunListForDemo() {
       spentUsdcMicros: run.budgetSpentUsdcMicros,
       createdAt: run.createdAt,
     }));
+}
+
+async function formatBudgetListForDemo(): Promise<DemoBudgetView[]> {
+  const databaseBudgets = await listBudgetsFromDatabase();
+  const budgetsSource = databaseBudgets ?? Array.from(budgetsById.values());
+
+  return budgetsSource
+    .map((budget: BudgetRecord) => ({
+      budgetId: budget.budgetId,
+      ownerEmail: budget.ownerEmail,
+      subscriptionId: budget.subscriptionId,
+      apiKeyPreview: formatApiKeyPreview(budget.apiKey),
+      balanceUsdcMicros: budget.balanceUsdcMicros,
+      refillAmountUsdcMicros: budget.refillAmountUsdcMicros,
+      status: budget.status,
+      lastWebhookEvent: budget.lastWebhookEvent,
+      lastRefilledAt: budget.lastRefilledAt,
+      updatedAt: budget.updatedAt,
+    }))
+    .sort((left: DemoBudgetView, right: DemoBudgetView) => {
+      const rightScore = right.subscriptionId ? 1 : 0;
+      const leftScore = left.subscriptionId ? 1 : 0;
+
+      if (rightScore !== leftScore) {
+        return rightScore - leftScore;
+      }
+
+      return right.updatedAt.localeCompare(left.updatedAt);
+    }) satisfies DemoBudgetView[];
 }
 
 const budgetsById = new Map<string, BudgetRecord>();
@@ -249,6 +323,17 @@ await (async () => {
     await seedDevBudget();
   }
 })();
+
+console.log("[gateway] config", {
+  databaseEnabled: isDatabaseEnabled(),
+  openAiConfigured: Boolean(process.env.OPENAI_API_KEY),
+  heliusConfigured: Boolean(process.env.HELIUS_API_KEY),
+  anchorProgramId: process.env.ANCHOR_PROGRAM_ID ?? null,
+  anchorClusterUrl: process.env.ANCHOR_CLUSTER_URL ?? null,
+  anchorPayerKeypairPath: process.env.ANCHOR_PAYER_KEYPAIR_PATH ?? null,
+  anchorPayerKeypairB64: Boolean(process.env.ANCHOR_PAYER_KEYPAIR_B64),
+  publisherOrigin: PUBLISHER_ORIGIN,
+});
 
 startSettlementWorker();
 
@@ -825,7 +910,7 @@ app.post("/webhooks/dodo", async (c) => {
 app.get("/dev/budgets", async (c) => {
   const databaseBudgets = await listBudgetsFromDatabase();
   const budgetsSource = databaseBudgets ?? Array.from(budgetsById.values());
-  const budgets = budgetsSource.map((budget) => ({
+  const budgets = budgetsSource.map((budget: BudgetRecord) => ({
     ...budget,
     apiKeyPreview: budget.apiKey ? `${budget.apiKey.slice(0, 8)}...` : null,
   }));
@@ -936,10 +1021,43 @@ app.post("/api/runs", async (c) => {
       };
     },
     executeHolderDistribution: async (runId) => {
-      const distribution = await fetchHolderDistribution({
-        address: body.targetAddress!,
-        cluster,
-      });
+      let distribution:
+        | Awaited<ReturnType<typeof fetchHolderDistribution>>
+        | {
+            summary: string;
+            source: "unavailable";
+            concentrationScore: "unavailable";
+            top10Percentage: number;
+            top20Percentage: number;
+            sampledHolderAccounts: number;
+          };
+
+      try {
+        distribution = await fetchHolderDistribution({
+          address: body.targetAddress!,
+          cluster,
+        });
+      } catch (thrownObject) {
+        const error =
+          thrownObject instanceof Error
+            ? thrownObject
+            : new Error(String(thrownObject));
+
+        distribution = {
+          summary:
+            `Holder distribution was unavailable for ${body.targetAddress!}. ` +
+            `This tool currently expects a token mint or a holder-concentration-compatible target, so the run continued without that signal.`,
+          source: "unavailable",
+          concentrationScore: "unavailable",
+          top10Percentage: 0,
+          top20Percentage: 0,
+          sampledHolderAccounts: 0,
+        };
+
+        console.warn(
+          `[gateway] holder-distribution unavailable for run ${runId}: ${error.message}`
+        );
+      }
 
       currentBudget = await debitBudget(
         currentBudget,
@@ -1054,7 +1172,7 @@ app.get("/api/runs/:id", (c) => {
   });
 });
 
-app.get("/api/runs/:id/report", (c) => {
+app.get("/api/runs/:id/report", async (c) => {
   const run = fetchAgentRun(c.req.param("id"));
 
   if (!run) {
@@ -1063,7 +1181,7 @@ app.get("/api/runs/:id/report", (c) => {
 
   return c.json({
     ok: true,
-    report: formatRunReport(run),
+    report: await formatRunReport(run),
   });
 });
 
@@ -1106,7 +1224,9 @@ app.get("/api/proof/:eventId", async (c) => {
 
   const windowEvents = await listEventsForWindow(window.id);
   const eventIndex = windowEvents.findIndex(
-    (windowEvent) => windowEvent.eventId === event.eventId
+    (
+      windowEvent: Awaited<ReturnType<typeof listEventsForWindow>>[number]
+    ) => windowEvent.eventId === event.eventId
   );
 
   if (eventIndex === -1) {
@@ -1184,24 +1304,70 @@ app.get("/api/proof/:eventId", async (c) => {
   });
 });
 
-app.get("/demo", (c) => {
+async function simulateDodoRenewal(c: Context) {
+  const body = (await c.req.json().catch(() => ({}))) as {
+    amountUsdCents?: number;
+  };
+  const amountUsdCents = Number(
+    body.amountUsdCents ?? DEFAULT_DEMO_DODO_TOP_UP_USD_CENTS
+  );
+
+  if (!Number.isFinite(amountUsdCents) || amountUsdCents < 100) {
+    return c.json(
+      { error: "amountUsdCents must be at least 100" },
+      400
+    );
+  }
+
+  const budget = await upsertBudgetFromDodo({
+    type: "subscription.renewed",
+    timestamp: new Date().toISOString(),
+    data: {
+      subscription_id: DEFAULT_DEMO_DODO_SUBSCRIPTION_ID,
+      status: "active",
+      recurring_pre_tax_amount: Math.floor(amountUsdCents),
+      customer: {
+        email: DEFAULT_DEMO_DODO_EMAIL,
+        name: DEFAULT_DEMO_DODO_NAME,
+      },
+    },
+  });
+
+  return c.json({
+    ok: true,
+    type: "subscription.renewed",
+    subscriptionId: budget.subscriptionId,
+    ownerEmail: budget.ownerEmail,
+    budgetId: budget.budgetId,
+    balanceUsdcMicros: budget.balanceUsdcMicros,
+    refillAmountUsdcMicros: budget.refillAmountUsdcMicros,
+    apiKeyPreview: formatApiKeyPreview(budget.apiKey),
+  });
+}
+
+app.post("/demo/dodo/simulate-renewal", simulateDodoRenewal);
+app.post("/demo/dodo/top-up", simulateDodoRenewal);
+
+app.get("/demo", async (c) => {
   return c.html(
     renderDemoHomeHtml({
       runs: formatRunListForDemo(),
+      budgets: await formatBudgetListForDemo(),
       defaultApiKey: DEV_API_KEY,
       defaultTargetAddress: DEV_SOLANA_RECIPIENT,
+      defaultTopUpUsdCents: DEFAULT_DEMO_DODO_TOP_UP_USD_CENTS,
     })
   );
 });
 
-app.get("/demo/runs/:id", (c) => {
+app.get("/demo/runs/:id", async (c) => {
   const run = fetchAgentRun(c.req.param("id"));
 
   if (!run) {
     return c.html("<h1>Run not found</h1>", 404);
   }
 
-  const report = formatRunReport(run);
+  const report = await formatRunReport(run);
 
   if (!report) {
     return c.html("<h1>Report unavailable</h1>", 404);

@@ -17,6 +17,15 @@ export type RunReportView = {
     endpointPath: string;
     description: string;
   }>;
+  verification: Array<{
+    eventId: string;
+    endpointPath: string;
+    billedUsdcMicros: number;
+    settlementWindowId: string | null;
+    settlementStatus: string | null;
+    proofUrl: string;
+    explorerUrl: string | null;
+  }>;
   markdown: string | null;
 };
 
@@ -28,6 +37,19 @@ export type DemoRunListItem = {
   riskLevel: "low" | "medium" | null;
   spentUsdcMicros: number;
   createdAt: string;
+};
+
+export type DemoBudgetView = {
+  budgetId: string;
+  ownerEmail: string;
+  subscriptionId: string | null;
+  apiKeyPreview: string | null;
+  balanceUsdcMicros: number;
+  refillAmountUsdcMicros: number;
+  status: string;
+  lastWebhookEvent: string | null;
+  lastRefilledAt: string | null;
+  updatedAt: string;
 };
 
 function formatUsd(usdcMicros: number) {
@@ -69,6 +91,25 @@ export function renderRunReportHtml(report: RunReportView) {
     .join("");
 
   const markdown = report.markdown ? escapeHtml(report.markdown) : "No markdown available.";
+  const verification = report.verification
+    .map(
+      (item) => `
+        <li style="margin:0 0 14px 0;line-height:1.6;">
+          <strong>${escapeHtml(item.endpointPath)}</strong>
+          <span style="color:#6b7280;"> · ${formatUsd(item.billedUsdcMicros)}</span><br />
+          <span style="color:#4b5563;">Event ${escapeHtml(item.eventId)}</span><br />
+          <a href="${escapeHtml(item.proofUrl)}" style="color:#0f766e;font-weight:600;">Open proof JSON</a>
+          ${
+            item.explorerUrl
+              ? ` · <a href="${escapeHtml(item.explorerUrl)}" style="color:#155e75;font-weight:600;">View Solana tx</a>`
+              : ""
+          }
+          <br />
+          <span style="color:#6b7280;">Window: ${escapeHtml(item.settlementWindowId ?? "pending")} · Status: ${escapeHtml(item.settlementStatus ?? "unassigned")}</span>
+        </li>
+      `
+    )
+    .join("");
 
   return `<!doctype html>
 <html lang="en">
@@ -245,16 +286,76 @@ export function renderRunReportHtml(report: RunReportView) {
           <pre>${markdown}</pre>
         </div>
       </section>
+
+      <section class="two-up">
+        <div class="panel">
+          <h2>Verification</h2>
+          <div class="muted" style="margin-bottom:12px;">These are the billed usage events for this run. Each one can be traced to a settlement window and a proof payload.</div>
+          <ul style="padding-left:20px;margin:0;">${verification || `<li style="line-height:1.6;color:#6b7280;">No verification events available.</li>`}</ul>
+        </div>
+        <div class="panel">
+          <h2>Why It Matters</h2>
+          <p style="margin:0;line-height:1.8;color:#334155;">
+            The gateway meters paid calls off-chain for speed, then anchors short settlement windows on Solana.
+            The proof links above connect an individual billed event to that committed batch.
+          </p>
+        </div>
+      </section>
     </div>
   </body>
 </html>`;
-} 
+}
 
 export function renderDemoHomeHtml(input: {
   runs: DemoRunListItem[];
+  budgets: DemoBudgetView[];
   defaultApiKey: string;
   defaultTargetAddress: string;
+  defaultTopUpUsdCents: number;
 }) {
+  const budgetCards = input.budgets
+    .map((budget) => {
+      const statusTone =
+        budget.status === "active"
+          ? "background:#e9f7ef;color:#126b3e;"
+          : budget.status === "exhausted"
+            ? "background:#fff1cc;color:#8a5a00;"
+            : "background:#f3f4f6;color:#374151;";
+
+      return `
+        <article style="padding:18px;border:1px solid #e5ded2;border-radius:18px;background:#fffdf9;">
+          <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px;">
+            <div>
+              <div style="font-size:12px;letter-spacing:0.12em;text-transform:uppercase;color:#6b7280;margin-bottom:8px;">${budget.subscriptionId ? "Dodo subscription budget" : "Local dev budget"}</div>
+              <div style="font-size:18px;font-weight:700;line-height:1.35;margin-bottom:8px;">${escapeHtml(budget.ownerEmail)}</div>
+              <div style="color:#4b5563;line-height:1.5;">${escapeHtml(
+                budget.subscriptionId ?? budget.budgetId
+              )}</div>
+            </div>
+            <span style="padding:8px 10px;border-radius:999px;font-size:12px;${statusTone}">${escapeHtml(
+              budget.status
+            )}</span>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-bottom:14px;">
+            <div style="padding:12px 14px;border-radius:14px;background:#f8fafc;border:1px solid #dbe4ee;">
+              <div style="font-size:12px;text-transform:uppercase;letter-spacing:0.08em;color:#6b7280;margin-bottom:6px;">Balance</div>
+              <div style="font-size:22px;font-weight:700;">${formatUsd(budget.balanceUsdcMicros)}</div>
+            </div>
+            <div style="padding:12px 14px;border-radius:14px;background:#f8fafc;border:1px solid #dbe4ee;">
+              <div style="font-size:12px;text-transform:uppercase;letter-spacing:0.08em;color:#6b7280;margin-bottom:6px;">Refill amount</div>
+              <div style="font-size:22px;font-weight:700;">${formatUsd(budget.refillAmountUsdcMicros)}</div>
+            </div>
+          </div>
+          <div style="color:#6b7280;font-size:14px;line-height:1.6;">
+            <div>Last event: ${escapeHtml(budget.lastWebhookEvent ?? "none")}</div>
+            <div>Last refilled: ${escapeHtml(budget.lastRefilledAt ?? "never")}</div>
+            <div>API key: ${escapeHtml(budget.apiKeyPreview ?? "hidden")}</div>
+          </div>
+        </article>
+      `;
+    })
+    .join("");
+
   const runCards = input.runs
     .map((run) => {
       const riskTone =
@@ -353,6 +454,10 @@ export function renderDemoHomeHtml(input: {
         gap: 20px;
         align-items: start;
       }
+      .stack {
+        display: grid;
+        gap: 20px;
+      }
       .panel {
         padding: 22px;
       }
@@ -413,6 +518,10 @@ export function renderDemoHomeHtml(input: {
         display: grid;
         gap: 14px;
       }
+      .budgets {
+        display: grid;
+        gap: 14px;
+      }
       @media (max-width: 980px) {
         .layout {
           grid-template-columns: 1fr;
@@ -426,33 +535,56 @@ export function renderDemoHomeHtml(input: {
         <div class="eyebrow">Dodo + Solana / Agent Budget Billing</div>
         <h1>Run a funded Solana screening agent.</h1>
         <div class="sub">
-          This local demo lets a human owner fund an agent budget, launch a wallet-screening run,
-          and inspect exactly how many paid tool calls the agent used before returning a report.
+          This local demo lets a human owner simulate a Dodo subscription renewal event,
+          launch a wallet-screening run, and inspect exactly how many paid tool calls the agent used before returning a report.
         </div>
       </section>
 
       <section class="layout">
-        <div class="panel">
-          <h2>Launch a Run</h2>
-          <form id="run-form">
-            <div class="field">
-              <label for="apiKey">API Key</label>
-              <input id="apiKey" name="apiKey" value="${escapeHtml(input.defaultApiKey)}" />
+        <div class="stack">
+          <div class="panel">
+            <h2>Dodo Budget Lifecycle</h2>
+            <p class="hint" style="margin-top:0;">
+              This panel keeps the sponsor story on screen: subscription-backed budgets, refill amount,
+              latest Dodo event, and the current spendable balance used by the agent.
+            </p>
+            <form id="dodo-top-up-form" style="display:flex;gap:12px;align-items:end;flex-wrap:wrap;margin-bottom:16px;">
+              <div class="field" style="margin:0;min-width:180px;flex:1;">
+                <label for="topUpUsdCents">Top-up amount (USD cents)</label>
+                <input id="topUpUsdCents" name="topUpUsdCents" type="number" min="100" step="100" value="${escapeHtml(
+                  String(input.defaultTopUpUsdCents)
+                )}" />
+              </div>
+              <button type="submit" style="background:#c2410c;">Simulate renewal event</button>
+            </form>
+            <div class="result" id="dodo-result"></div>
+            <div class="budgets">
+              ${budgetCards || `<div class="hint">No budgets available yet.</div>`}
             </div>
-            <div class="field">
-              <label for="targetAddress">Target Wallet</label>
-              <input id="targetAddress" name="targetAddress" value="${escapeHtml(input.defaultTargetAddress)}" />
-            </div>
-            <div class="field">
-              <label for="prompt">Prompt</label>
-              <textarea id="prompt" name="prompt">Screen this wallet before treasury sends funds and give me the brief.</textarea>
-            </div>
-            <button type="submit">Run funded agent</button>
-          </form>
-          <div class="result" id="result"></div>
-          <p class="hint">
-            Current planner v0 performs 3 paid tool calls: wallet summary, recent activity, and heuristic risk flags.
-          </p>
+          </div>
+
+          <div class="panel">
+            <h2>Launch a Run</h2>
+            <form id="run-form">
+              <div class="field">
+                <label for="apiKey">API Key</label>
+                <input id="apiKey" name="apiKey" value="${escapeHtml(input.defaultApiKey)}" />
+              </div>
+              <div class="field">
+                <label for="targetAddress">Target Wallet</label>
+                <input id="targetAddress" name="targetAddress" value="${escapeHtml(input.defaultTargetAddress)}" />
+              </div>
+              <div class="field">
+                <label for="prompt">Prompt</label>
+                <textarea id="prompt" name="prompt">Screen this wallet before treasury sends funds and give me the brief.</textarea>
+              </div>
+              <button type="submit">Run funded agent</button>
+            </form>
+            <div class="result" id="result"></div>
+            <p class="hint">
+              Current planner v0 performs 5 paid tool calls: wallet summary, recent activity, holder distribution, risk flags, and LLM analysis.
+            </p>
+          </div>
         </div>
 
         <div class="panel">
@@ -466,6 +598,51 @@ export function renderDemoHomeHtml(input: {
     <script>
       const form = document.getElementById("run-form");
       const result = document.getElementById("result");
+      const dodoTopUpForm = document.getElementById("dodo-top-up-form");
+      const dodoResult = document.getElementById("dodo-result");
+
+      dodoTopUpForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+
+        const amountUsdCents = Number(document.getElementById("topUpUsdCents").value);
+
+        dodoResult.className = "result show";
+        dodoResult.innerHTML = "Simulating Dodo renewal event...";
+
+        try {
+          const response = await fetch("/demo/dodo/simulate-renewal", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({
+              amountUsdCents,
+            }),
+          });
+
+          const payload = await response.json();
+
+          if (!response.ok) {
+            dodoResult.innerHTML = "<strong>Top-up failed:</strong> " + (payload.error || response.statusText);
+            return;
+          }
+
+          dodoResult.innerHTML = [
+            "<strong>Dodo renewal event applied.</strong>",
+            "<br />",
+            "Subscription: <code>" + payload.subscriptionId + "</code>",
+            "<br />",
+            "New balance: <strong>$" + (payload.balanceUsdcMicros / 1000000).toFixed(2) + "</strong>",
+            "<br />",
+            "Refill amount: <strong>$" + (payload.refillAmountUsdcMicros / 1000000).toFixed(2) + "</strong>",
+            "<br /><br />Refreshing budget cards..."
+          ].join("");
+
+          setTimeout(() => window.location.reload(), 900);
+        } catch (error) {
+          dodoResult.innerHTML = "<strong>Unexpected error:</strong> " + error.message;
+        }
+      });
 
       form.addEventListener("submit", async (event) => {
         event.preventDefault();

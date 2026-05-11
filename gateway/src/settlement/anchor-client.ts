@@ -13,10 +13,23 @@ const CLUSTER_URL =
 const KEYPAIR_PATH =
   process.env.ANCHOR_PAYER_KEYPAIR_PATH ??
   `${homedir()}/.config/solana/id.json`;
+const KEYPAIR_B64 = process.env.ANCHOR_PAYER_KEYPAIR_B64 ?? null;
+const KEYPAIR_JSON = process.env.ANCHOR_PAYER_KEYPAIR_JSON ?? null;
 
 let cachedProgram: anchor.Program<GatewaySettlement> | null = null;
 
 function loadPayer() {
+  if (KEYPAIR_B64) {
+    const decoded = Buffer.from(KEYPAIR_B64, "base64").toString("utf8");
+    return Keypair.fromSecretKey(Uint8Array.from(JSON.parse(decoded) as Array<number>));
+  }
+
+  if (KEYPAIR_JSON) {
+    return Keypair.fromSecretKey(
+      Uint8Array.from(JSON.parse(KEYPAIR_JSON) as Array<number>)
+    );
+  }
+
   const raw = JSON.parse(readFileSync(KEYPAIR_PATH, "utf8")) as Array<number>;
   return Keypair.fromSecretKey(Uint8Array.from(raw));
 }

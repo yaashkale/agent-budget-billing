@@ -96,6 +96,15 @@ export type CommittedSettlementWindowRecord = {
   onChainWindowPda: string | null;
 };
 
+export type RequestUsageEventRecord = {
+  eventId: string;
+  endpointPath: string;
+  billedUsdcMicros: number;
+  settlementWindowId: string | null;
+  settlementStatus: string | null;
+  onChainTxSignature: string | null;
+};
+
 const DEFAULT_PUBLISHER_SLUG =
   process.env.DEFAULT_PUBLISHER_SLUG ?? "publisher-0";
 const DATABASE_URL = process.env.DATABASE_URL ?? null;
@@ -623,7 +632,9 @@ export async function upsertBudgetFromDodoInDatabase(
   return toBudgetRecord(insertedBudget.rows[0], apiKey);
 }
 
-export async function listBudgetsFromDatabase() {
+export async function listBudgetsFromDatabase(): Promise<
+  Array<BudgetRecord> | null
+> {
   if (!pool) {
     return null;
   }
@@ -746,7 +757,9 @@ export async function recordUsageEventInDatabase(input: {
   } satisfies UsageEventRecord;
 }
 
-export async function listUsageEventsFromDatabase() {
+export async function listUsageEventsFromDatabase(): Promise<
+  Array<UsageEventRecord> | null
+> {
   if (!pool) {
     return null;
   }
@@ -925,7 +938,9 @@ export async function listWindowsToCommit() {
   })) satisfies Array<SettlementWindowRecord>;
 }
 
-export async function listEventsForWindow(windowId: string) {
+export async function listEventsForWindow(
+  windowId: string
+): Promise<Array<SettlementWindowEventRecord>> {
   if (!pool) {
     return [];
   }
@@ -1094,6 +1109,48 @@ export async function fetchSettlementWindowById(windowId: string) {
     onChainTxSignature: row.on_chain_tx_signature,
     onChainWindowPda: row.on_chain_window_pda,
   } satisfies CommittedSettlementWindowRecord;
+}
+
+export async function listUsageEventsForRequestId(
+  requestId: string
+): Promise<Array<RequestUsageEventRecord>> {
+  if (!pool) {
+    return [];
+  }
+
+  const result = await pool.query<{
+    event_id: string;
+    endpoint_path: string;
+    billed_usdc_micros: string | number;
+    settlement_window_id: string | null;
+    settlement_status: string | null;
+    on_chain_tx_signature: string | null;
+  }>(
+    `
+      SELECT
+        ue.id AS event_id,
+        ue.endpoint_path,
+        ue.billed_usdc_micros,
+        ue.settlement_window_id,
+        sw.status AS settlement_status,
+        sw.on_chain_tx_signature
+      FROM usage_events ue
+      LEFT JOIN settlement_windows sw
+        ON sw.id = ue.settlement_window_id
+      WHERE ue.request_id = $1
+      ORDER BY ue.created_at ASC, ue.id ASC
+    `,
+    [requestId]
+  );
+
+  return result.rows.map((row) => ({
+    eventId: row.event_id,
+    endpointPath: row.endpoint_path,
+    billedUsdcMicros: Number(row.billed_usdc_micros),
+    settlementWindowId: row.settlement_window_id,
+    settlementStatus: row.settlement_status,
+    onChainTxSignature: row.on_chain_tx_signature,
+  })) satisfies RequestUsageEventRecord[];
 }
 
 export async function markWindowClosedPendingCommit(windowId: string) {

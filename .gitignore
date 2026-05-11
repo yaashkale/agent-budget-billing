@@ -10,3 +10,4 @@ coverage
 tmp
 *.tsbuildinfo
 test-ledger
+.DS_Store

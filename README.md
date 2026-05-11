@@ -207,6 +207,77 @@ More package-specific details:
 - [`program/README.md`](program/README.md)
 - [`db/README.md`](db/README.md)
 
+## Cloud Deployment
+
+The fastest path to host the demo is to deploy the `gateway` service, because it already serves:
+
+- the paid API routes
+- the agent run endpoints
+- the `/demo` UI
+- the settlement worker
+- the proof endpoint
+
+This repo now includes:
+
+- a root `Dockerfile`
+- a root `.dockerignore`
+- a gateway env template at `gateway/.env.example`
+
+Container start command:
+
+```bash
+npm run start --workspace gateway
+```
+
+Minimum runtime requirements for a hosted demo:
+
+- Postgres database
+- OpenAI API key
+- Helius API key
+- Solana payer keypair provided as `ANCHOR_PAYER_KEYPAIR_B64`, `ANCHOR_PAYER_KEYPAIR_JSON`, or a mounted file path
+- the Anchor program env pointing at the deployed devnet program
+
+Before first boot against a fresh database, run:
+
+```bash
+npm run migrate
+```
+
+### Fly.io Quick Start
+
+This repo now includes a starter `fly.toml` for the gateway service.
+
+Suggested stack:
+
+- Fly.io for the always-on gateway + settlement worker
+- Neon for Postgres
+- Vercel for the `wallet-summary` publisher if you want to host it separately
+
+Typical flow:
+
+```bash
+fly launch --no-deploy
+fly secrets set DATABASE_URL=... OPENAI_API_KEY=... HELIUS_API_KEY=...
+fly secrets set ANCHOR_PROGRAM_ID=92xJg6zJM8Rh8bPDnpuX1PxSnVJ1dojodsE1dSJqNAHh
+fly secrets set ANCHOR_CLUSTER_URL=https://api.devnet.solana.com
+fly secrets set ANCHOR_PAYER_KEYPAIR_B64=...
+fly secrets set PUBLISHER_ORIGIN=https://your-publisher.example.com
+fly deploy
+```
+
+Notes:
+
+- update the `app` name in `fly.toml` if the default is unavailable
+- `fly deploy` will run `npm run migrate` first through Fly's `release_command`
+- the gateway boot log prints which critical env vars resolved successfully
+
+For the hackathon demo, hosting the gateway alone is enough to expose:
+
+- `/demo`
+- `/api/runs`
+- `/api/proof/:eventId`
+- settlement commits on devnet
+
 ## Demo Story
 
 The intended demo loop is:

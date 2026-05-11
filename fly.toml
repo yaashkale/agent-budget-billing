@@ -1,0 +1,37 @@
+app = "agent-budget-billing-gateway"
+primary_region = "sin"
+
+[build]
+
+[env]
+  NODE_ENV = "production"
+  PORT = "8787"
+
+[deploy]
+  release_command = "npm run migrate"
+  strategy = "rolling"
+
+  [deploy.release_command_vm]
+    size = "shared-cpu-1x"
+    memory = "512mb"
+
+[http_service]
+  internal_port = 8787
+  force_https = true
+  auto_start_machines = true
+  auto_stop_machines = "off"
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    grace_period = "20s"
+    interval = "15s"
+    method = "GET"
+    path = "/health"
+    protocol = "http"
+    timeout = "5s"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "512mb"
